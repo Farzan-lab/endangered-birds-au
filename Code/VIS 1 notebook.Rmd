@@ -1,0 +1,223 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+```{r}
+library(ggplot2)
+library(dplyr) # for using %>%
+library(lubridate) #For converting .txt to Date format
+```
+```{r}
+birds_data <- read.csv("ALA_PE2S12026.csv")
+
+viz_data <- birds_data %>%
+  mutate(
+    date = as.Date(observationDate),
+    month_num = month(date),
+    season = case_when(
+      month_num %in% c(9, 10, 11) ~ "Spring",
+      month_num %in% c(12, 1, 2) ~ "Summer",
+      month_num %in% c(3, 4, 5) ~ "Autumn",
+      month_num %in% c(6, 7, 8) ~ "Winter"
+    )
+  ) %>%
+  group_by(vernacularName, season) %>%
+  summarise(count = n(), .groups = 'drop') %>%
+  group_by(vernacularName) %>%
+  mutate(proportion = count / sum(count))
+```
+```{r}
+ggplot(viz_data, aes(x = vernacularName, y = proportion, fill = season)) +
+  geom_bar(stat = "identity", position = "fill") +
+  scale_y_continuous(labels = scales::percent) +
+  scale_fill_brewer(palette = "Set2") +
+  labs(title = "Seasonal Distribution of Birds", x = "Species", y = "Proportion") +
+  theme_minimal()
+
+```
+```{r}
+install.packages("leaflet")
+```
+
+
+```{r}
+install.packages("shiny")
+```
+
+
+
+```{r}
+library(shiny)
+library(leaflet)
+library(ggplot2)
+library(dplyr)
+library(lubridate)
+library(htmltools)
+
+# --- 1. UI Design ---
+ui <- fluidPage(
+  tags$div(
+    style = "text-align: center; padding: 20px;",
+    h1("Endangered Bird Species Analysis in Australia")
+  ),
+  hr(),
+  
+  # VIS 1 Section
+  fluidRow(
+    column(width = 7, plotOutput("seasonalPlot", height = "400px")),
+    column(width = 5,
+           wellPanel(
+             h4("VIS 1: Seasonal Distribution Narrative"),
+             p("This 100% stacked bar chart illustrates the proportional seasonal presence of bird species. 
+               By using 'Position' as a visual variable on a common scale, we can accurately compare 
+               distributions across different species regardless of total observation counts. 
+               This helps identify migratory behaviors versus year-round residency.")
+           ))
+  ),
+  hr(),
+  
+  # MAP Section
+  fluidRow(
+    column(width = 3, 
+           wellPanel(
+             h4("Map Controls"),
+             uiOutput("species_selector"),
+             hr(),
+             radioButtons("season_filter", "Select Season:",
+                          choices = c("Full Year" = "All", "Summer", "Autumn", "Winter", "Spring"),
+                          selected = "All")
+           )),
+    column(width = 9, leafletOutput("map", height = "550px"))
+  ),
+  
+  # MAP Description
+  fluidRow(
+    column(width = 12,
+           wellPanel(
+             h4("MAP: Description and Interpretation"),
+             p("This interactive map visualizes geographic sighting density across Australia. 
+               A key insight is the migration of the Swift Parrot (Lathamus discolor); 
+               during Winter, they concentrate in South-Eastern Australia after breeding in Tasmania. 
+               The circle radius is scaled to observation counts, identifying critical habitat hotspots.")
+           ))
+  ),
+  
+  # --- DATA SOURCE INFORMATION (Left Aligned - Requirement 3) ---
+  hr(),
+  tags$footer(
+    style = "text-align: left; padding: 10px 20px 30px 20px; font-size: 0.95em;",
+    p(strong("(Original) Data Source Information")),
+    p("Name: Occurrence download of Atlas of Living Australia (ALA)"),
+    p("URL: ", a("https://www.ala.org.au/", href="https://www.ala.org.au/", target="_blank")),
+    p("Licensor: Atlas of Living Australia (CC BY 4.0)"),
+    p("Date of Version: April 2026")
+  )
+)
+
+# --- 2. Server Logic ---
+server <- function(input, output, session) {
+  
+  # Load and Prepare Data
+  raw_data <- reactive({
+    tryCatch({
+      df <- read.csv("ALA_PE2S12026.csv")
+      # Force standardize coordinates names to prevent 'inference' error
+      names(df)[tolower(names(df)) == "decimallatitude"] <- "decimalLatitude"
+      names(df)[tolower(names(df)) == "decimallongitude"] <- "decimalLongitude"
+      
+      df %>%
+        mutate(
+          date = as.Date(observationDate),
+          month_num = month(date),
+          Season = case_when(
+            month_num %in% c(9, 10, 11) ~ "Spring",
+            month_num %in% c(12, 1, 2)  ~ "Summer",
+            month_num %in% c(3, 4, 5)   ~ "Autumn",
+            month_num %in% c(6, 7, 8)   ~ "Winter"
+          ),
+          Season = factor(Season, levels = c("Summer", "Autumn", "Winter", "Spring"))
+        )
+    }, error = function(e) return(NULL))
+  })
+
+  # Dynamic Checklist
+  output$species_selector <- renderUI({
+    df <- raw_data()
+    req(df)
+    checkboxGroupInput("species_filter", "Select Bird Species:",
+                       choices = unique(df$vernacularName),
+                       selected = unique(df$vernacularName))
+  })
+
+  # Visualisation 1: Proportional Bar Chart
+  output$seasonalPlot <- renderPlot({
+    df <- raw_data()
+    req(df)
+    viz_summary <- df %>%
+      group_by(vernacularName, Season) %>%
+      summarise(count = n(), .groups = 'drop') %>%
+      group_by(vernacularName) %>%
+      mutate(Proportion = count / sum(count))
+
+    ggplot(viz_summary, aes(x = vernacularName, y = Proportion, fill = Season)) +
+      geom_bar(stat = "identity", position = "fill") +
+      scale_y_continuous(labels = scales::percent) +
+      scale_fill_brewer(palette = "Set2") +
+      labs(title = "Proportional Seasonal Distribution", x = "Species", y = "Percentage") +
+      theme_minimal() +
+      theme(axis.text.x = element_text(angle = 45, hjust = 1))
+  })
+
+  # Reactive Filter for Map
+  filtered_df <- reactive({
+    df <- raw_data()
+    req(df, input$species_filter)
+    
+    data <- df %>% dplyr::filter(vernacularName %in% input$species_filter)
+    
+    if (input$season_filter != "All") {
+      data <- data %>% dplyr::filter(Season == input$season_filter)
+    }
+    
+    data %>%
+      group_by(decimalLatitude, decimalLongitude, scientificName, vernacularName, stateProvince) %>%
+      summarise(obs_count = n(), .groups = "drop")
+  })
+
+  # Initial Map View
+  output$map <- renderLeaflet({
+    leaflet() %>%
+      addTiles() %>%
+      setView(lng = 133.9453, lat = -30.4486, zoom = 3)
+  })
+
+  # Markers and Legend
+  observe({
+    data <- filtered_df()
+    req(data)
+    req(nrow(data) > 0)
+    
+    bird_pal <- colorFactor(palette = "Dark2", domain = data$vernacularName)
+    
+    leafletProxy("map", data = data) %>%
+      clearMarkers() %>%
+      clearControls() %>%
+      addCircleMarkers(
+        lng = ~decimalLongitude,
+        lat = ~decimalLatitude,
+        radius = ~pmin(sqrt(obs_count) * 1.5, 20),
+        color = ~bird_pal(vernacularName),
+        fillOpacity = 0.6,
+        stroke = FALSE,
+        label = ~paste0("<b>Common:</b> ", vernacularName, 
+                        "<br><b>Scientific:</b> ", scientificName,
+                        "<br><b>Count:</b> ", obs_count) %>% lapply(htmltools::HTML)
+      ) %>%
+      addLegend(position = "bottomright", pal = bird_pal, values = ~vernacularName, title = "Species")
+  })
+}
+
+shinyApp(ui, server)
+```
+
+
